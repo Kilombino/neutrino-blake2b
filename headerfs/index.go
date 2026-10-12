@@ -33,6 +33,11 @@ var (
 	// pre-created. Its presence lets newHeaderIndex skip the bulk
 	// sub-bucket creation step on subsequent process starts.
 	indexSubBucketsReady = []byte("index-sub-buckets-ready")
+
+	// blake2bHeightKey records the BLAKE2b height the block header file
+	// was laid out with (see blockHeaderLayout): read with another one,
+	// every record from the lower of the two would be at the wrong offset.
+	blake2bHeightKey = []byte("blake2b-height")
 )
 
 var (
@@ -568,4 +573,32 @@ func deleteHeaderEntries(rootBucket walletdb.ReadWriteBucket,
 	}
 
 	return nil
+}
+
+// layoutHeight returns the BLAKE2b height recorded for the block header file,
+// and whether one was recorded.
+func (h *headerIndex) layoutHeight() (uint32, bool, error) {
+	var (
+		height uint32
+		found  bool
+	)
+	err := walletdb.View(h.db, func(tx walletdb.ReadTx) error {
+		v := tx.ReadBucket(indexBucket).Get(blake2bHeightKey)
+		if len(v) != 4 {
+			return nil
+		}
+		height, found = binary.BigEndian.Uint32(v), true
+		return nil
+	})
+	return height, found, err
+}
+
+// setLayoutHeight records the BLAKE2b height the block header file is laid
+// out with.
+func (h *headerIndex) setLayoutHeight(height uint32) error {
+	return walletdb.Update(h.db, func(tx walletdb.ReadWriteTx) error {
+		var v [4]byte
+		binary.BigEndian.PutUint32(v[:], height)
+		return tx.ReadWriteBucket(indexBucket).Put(blake2bHeightKey, v[:])
+	})
 }
