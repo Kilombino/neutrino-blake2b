@@ -136,3 +136,79 @@ func TestBlockHeaderStoreAcrossBlake2b(t *testing.T) {
 	require.Equal(t, tip, tipHeight)
 	require.Equal(t, all[tip].BlockHash(), tipHeader.BlockHash())
 }
+
+// TestBlockHeaderStoreTrimsPartialRecord checks that a header file ending in
+// part of a record (a write cut short) is cut back to its last whole header
+// when the store opens, in the classic run and in the v2 run, and that the
+// store then appends at the right offset.
+func TestBlockHeaderStoreTrimsPartialRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		classic int // classic headers written (genesis included)
+		v2      int // v2 headers written after them
+		junk    int // bytes of a partial record appended
+	}{
+		{"classic run", len(blockHdrs), 0, 30},
+		{"v2 run", len(blockHdrs), len(blake2bHdrs), 100},
+		{"first v2 record", len(blockHdrs), 0, 90},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := walletdb.Create(
+				"bdb", filepath.Join(dir, "test.db"), true,
+				time.Second*10,
+			)
+			require.NoError(t, err)
+			defer db.Close()
+
+			params := chaincfg.SimNetParams
+			params.Blake2bHeight = int32(len(blockHdrs))
+			store, err := NewBlockHeaderStore(dir, db, &params)
+			require.NoError(t, err)
+			bhs := store.(*blockHeaderStore)
+
+			var all []BlockHeader
+			for i, s := range blockHdrs {
+				all = append(all, BlockHeader{
+					BlockHeader: decodeHeader(t, s), Height: uint32(i),
+				})
+			}
+			for i, s := range blake2bHdrs {
+				all = append(all, BlockHeader{
+					BlockHeader: decodeHeader(t, s),
+					Height:      uint32(len(blockHdrs) + i),
+				})
+			}
+			n := tc.classic + tc.v2
+			require.NoError(t, bhs.WriteHeaders(all[1:n]...))
+
+			// A cut-short write leaves junk after the last record.
+			path := filepath.Join(dir, "block_headers.bin")
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+			require.NoError(t, err)
+			_, err = f.Write(bytes.Repeat([]byte{0xab}, tc.junk))
+			require.NoError(t, err)
+			require.NoError(t, f.Close())
+
+			store, err = NewBlockHeaderStore(dir, db, &params)
+			require.NoError(t, err)
+			bhs = store.(*blockHeaderStore)
+			fi, err := os.Stat(path)
+			require.NoError(t, err)
+			require.Equal(t, int64(bhs.blockLayout.offset(uint32(n))), fi.Size())
+
+			tip, height, err := store.ChainTip()
+			require.NoError(t, err)
+			require.EqualValues(t, n-1, height)
+			require.Equal(t, all[n-1].BlockHash(), tip.BlockHash())
+
+			// And the next header goes where it belongs.
+			if n < len(all) {
+				require.NoError(t, bhs.WriteHeaders(all[n]))
+				got, err := store.FetchHeaderByHeight(uint32(n))
+				require.NoError(t, err)
+				require.Equal(t, all[n].BlockHash(), got.BlockHash())
+			}
+		})
+	}
+}

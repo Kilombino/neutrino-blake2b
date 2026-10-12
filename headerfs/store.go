@@ -179,6 +179,13 @@ func (h *headerFile) truncateHeaders(numHeaders uint32,
 		newSize = fileSize - truncateLength
 	}
 
+	return h.truncateFile(newSize)
+}
+
+// truncateFile cuts the flat file to newSize bytes.
+func (h *headerFile) truncateFile(newSize int64) error {
+	var err error
+
 	// On Windows, we need to close, truncate, and reopen the file.
 	if runtime.GOOS == "windows" {
 		fileName := h.file.Name()
@@ -317,9 +324,27 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 
 	// First, we'll compute the size of the current file so we can
 	// calculate the latest header written to disk.
-	fileCount, err := layout.count(fileInfo.Size())
-	if err != nil {
-		return nil, err
+	// A write cut short (a crash, a power cut) can leave part of a header
+	// at the end of the file. Upstream reads the count with a floor and
+	// carries on, which puts every later append at the wrong offset;
+	// here the partial record is cut off first, so the file is whole
+	// headers again and the tip check below repairs the rest.
+	fileCount, whole := layout.whole(fileInfo.Size())
+	if whole != fileInfo.Size() {
+		if err := bhs.truncateFile(whole); err != nil {
+			return nil, err
+		}
+	}
+	if fileCount == 0 {
+		genesisHeader := BlockHeader{
+			BlockHeader: &netParams.GenesisBlock.Header,
+			Height:      0,
+		}
+		if err := bhs.WriteHeaders(genesisHeader); err != nil {
+			return nil, err
+		}
+
+		return bhs, nil
 	}
 	fileHeight := fileCount - 1
 
