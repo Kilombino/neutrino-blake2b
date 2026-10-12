@@ -729,6 +729,13 @@ type ChainService struct { // nolint:maligned
 // bitcoin network type specified by chainParams.  Use start to begin syncing
 // with peers.
 func NewChainService(cfg Config) (*ChainService, error) {
+	// The header import reads 80-byte records only: it cannot carry a
+	// chain past its BLAKE2b height.
+	if cfg.HeadersImport != nil && cfg.ChainParams.Blake2bPowDeployed() {
+		return nil, fmt.Errorf("importing headers from a file is not " +
+			"supported on a network with BLAKE2b proof of work")
+	}
+
 	// Use the default broadcast timeout if one isn't provided.
 	if cfg.BroadcastTimeout == 0 {
 		cfg.BroadcastTimeout = pushtx.DefaultBroadcastTimeout

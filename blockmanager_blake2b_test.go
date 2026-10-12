@@ -97,3 +97,15 @@ func TestHandleHeadersBansSHA256dPeer(t *testing.T) {
 	require.Equal(t, []banman.Reason{banman.InvalidBlock}, reasons)
 	require.True(t, disconnected())
 }
+
+// TestHeadersImportRefusedOnBlake2b checks that the 80-byte-only header import
+// is refused on a network with BLAKE2b proof of work.
+func TestHeadersImportRefusedOnBlake2b(t *testing.T) {
+	params := chaincfg.SimNetParams
+	params.Blake2bHeight = 3
+	_, err := NewChainService(Config{
+		ChainParams:   params,
+		HeadersImport: &HeadersImportConfig{BlockHeadersSource: "x"},
+	})
+	require.ErrorContains(t, err, "BLAKE2b")
+}
