@@ -70,6 +70,19 @@ func (l blockHeaderLayout) count(fileSize int64) (uint32, error) {
 	return l.v2Height + uint32((size-classic)/wire.BlockHeaderLenV2), nil
 }
 
+// whole is the number of whole headers in a file of this size, and the size
+// those headers take: a partial record at the end is left out.
+func (l blockHeaderLayout) whole(fileSize int64) (uint32, int64) {
+	size := uint64(fileSize)
+	classic := uint64(l.v2Height) * wire.BlockHeaderLenV1
+	if l.v2Height == 0 || size <= classic {
+		n := size / wire.BlockHeaderLenV1
+		return uint32(n), int64(n * wire.BlockHeaderLenV1)
+	}
+	n := (size - classic) / wire.BlockHeaderLenV2
+	return l.v2Height + uint32(n), int64(classic + n*wire.BlockHeaderLenV2)
+}
+
 // check refuses a header whose format is not the one its height is stored in:
 // writing it would shift every record after it.
 func (l blockHeaderLayout) check(header *wire.BlockHeader, height uint32) error {
