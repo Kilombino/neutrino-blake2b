@@ -5,6 +5,7 @@ package neutrino
 import (
 	"bytes"
 	"container/list"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -2490,9 +2491,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				&prevNodeHeader,
 			)
 			if err != nil {
-				log.Warnf("Header doesn't pass sanity check: "+
-					"%s -- disconnecting peer", err)
-				hmsg.peer.Disconnect()
+				b.rejectHeaderPeer(hmsg.peer, err)
 				return
 			}
 
@@ -2620,10 +2619,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					int32(prevNodeHeight), prevNodeHeader,
 				)
 				if err != nil {
-					log.Warnf("Header doesn't pass sanity"+
-						" check: %s -- disconnecting "+
-						"peer", err)
-					hmsg.peer.Disconnect()
+					b.rejectHeaderPeer(hmsg.peer, err)
 					return
 				}
 				totalWork.Add(totalWork,
@@ -2867,6 +2863,34 @@ func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 		blockHeader, b.cfg.ChainParams.PowLimit, b.cfg.TimeSource,
 		emptyFlags,
 	)
+}
+
+// rejectHeaderPeer drops a peer whose header failed the sanity check. A peer
+// whose header breaks a BLAKE2b header rule (blockchain.ErrBadHeaderV2) is
+// banned, not only disconnected: that is a peer following the SHA256d chain,
+// which still sends classic headers past the BLAKE2b height. The DNS seeds of
+// mainnet and testnet4 return mostly such peers; merely disconnected, they are
+// dialled again, and the sync peer is picked by the height it claims, which is
+// usually theirs, so a node could sit just below the activation height for
+// good, and hand them its transactions meanwhile.
+func (b *blockManager) rejectHeaderPeer(peer *ServerPeer, err error) {
+	var rerr blockchain.RuleError
+	if errors.As(err, &rerr) &&
+		rerr.ErrorCode == blockchain.ErrBadHeaderV2 {
+
+		log.Warnf("Header from %v breaks a BLAKE2b header rule: %v "+
+			"-- banning peer", peer, err)
+		banErr := b.cfg.BanPeer(peer.Addr(), banman.InvalidBlock)
+		if banErr != nil {
+			log.Errorf("Unable to ban peer %v: %v", peer, banErr)
+		}
+		peer.Disconnect()
+		return
+	}
+
+	log.Warnf("Header doesn't pass sanity check: %s -- disconnecting "+
+		"peer", err)
+	peer.Disconnect()
 }
 
 // onBlockConnected queues a block notification that extends the current chain.
