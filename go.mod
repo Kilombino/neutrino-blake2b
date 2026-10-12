@@ -43,4 +43,4 @@ require (
 
 go 1.23.6
 
-replace github.com/btcsuite/btcd => github.com/Kilombino/btcd-blake2b v0.25.1-blake2b.5.0.20261011180634-48674bc1b167
+replace github.com/btcsuite/btcd => github.com/paulscode/btcd-blake2b v0.25.1-blake2b.6
