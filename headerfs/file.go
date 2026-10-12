@@ -115,6 +115,14 @@ func (h *blockHeaderStore) readHeaderRange(startHeight uint32,
 		headers = append(headers, nextHeader)
 	}
 
+	// The layout and the headers' own widths must agree: a mismatch
+	// means the file is not what the layout says it is.
+	if uint32(len(headers)) != numHeaders {
+		return nil, fmt.Errorf("read %d block headers for heights "+
+			"%d-%d, want %d", len(headers), startHeight, endHeight,
+			numHeaders)
+	}
+
 	return headers, nil
 }
 
