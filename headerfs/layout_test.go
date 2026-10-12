@@ -213,6 +213,72 @@ func TestBlockHeaderStoreTrimsPartialRecord(t *testing.T) {
 	}
 }
 
+// TestBlockHeaderStoreIndexAheadOfFile checks that a store whose index got
+// ahead of its file (the last record only partly reached the disk, while the
+// index commit did) opens with the index rolled back to the file's tip,
+// instead of failing on a truncation count that wrapped around.
+func TestBlockHeaderStoreIndexAheadOfFile(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		v2   int // v2 headers written
+		cut  int // bytes cut off the last record
+	}{
+		{"classic record", 0, 30},
+		{"v2 record", len(blake2bHdrs), 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := walletdb.Create(
+				"bdb", filepath.Join(dir, "test.db"), true,
+				time.Second*10,
+			)
+			require.NoError(t, err)
+			defer db.Close()
+
+			params := chaincfg.SimNetParams
+			params.Blake2bHeight = int32(len(blockHdrs))
+			store, err := NewBlockHeaderStore(dir, db, &params)
+			require.NoError(t, err)
+			bhs := store.(*blockHeaderStore)
+
+			var all []BlockHeader
+			for i, s := range blockHdrs {
+				all = append(all, BlockHeader{
+					BlockHeader: decodeHeader(t, s), Height: uint32(i),
+				})
+			}
+			for i, s := range blake2bHdrs {
+				all = append(all, BlockHeader{
+					BlockHeader: decodeHeader(t, s),
+					Height:      uint32(len(blockHdrs) + i),
+				})
+			}
+			n := len(blockHdrs) + tc.v2
+			require.NoError(t, bhs.WriteHeaders(all[1:n]...))
+
+			// The last record only partly made it to the disk.
+			path := filepath.Join(dir, "block_headers.bin")
+			fi, err := os.Stat(path)
+			require.NoError(t, err)
+			require.NoError(t, os.Truncate(path, fi.Size()-int64(tc.cut)))
+
+			store, err = NewBlockHeaderStore(dir, db, &params)
+			require.NoError(t, err)
+			tip, height, err := store.ChainTip()
+			require.NoError(t, err)
+			require.EqualValues(t, n-2, height)
+			require.Equal(t, all[n-2].BlockHash(), tip.BlockHash())
+
+			// The lost header is written again where it belongs.
+			bhs = store.(*blockHeaderStore)
+			require.NoError(t, bhs.WriteHeaders(all[n-1]))
+			got, err := store.FetchHeaderByHeight(uint32(n - 1))
+			require.NoError(t, err)
+			require.Equal(t, all[n-1].BlockHash(), got.BlockHash())
+		})
+	}
+}
+
 // TestBlockHeaderStoreRefusesOtherBlake2bHeight checks that a header file
 // written with one BLAKE2b height is not read with another (a changed
 // regtest activation height would read every later record at the wrong

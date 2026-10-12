@@ -389,9 +389,16 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 		return bhs, nil
 	}
 
-	// TODO(roasbeef): below assumes index can never get ahead?
-	//  * we always update files _then_ indexes
-	//  * need to dual pointer walk back for max safety
+	// The index can get ahead of the file: the file is appended before
+	// the index is written, but the index commit can reach the disk while
+	// the file's last records do not (a phone killed mid-write, a power
+	// cut), and the partial record cut off above is one such header.
+	// fileHeight-tipHeight then wraps around and the store never opens
+	// again. Roll the index back to the file's tip instead; the headers
+	// past it are fetched again on the next sync.
+	if fileHeight < tipHeight {
+		return bhs, bhs.truncateIndices(&latestBlockHash, nil, false)
+	}
 
 	// Otherwise, we'll need to truncate the file until it matches the
 	// current index tip.
@@ -978,7 +985,13 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	}
 
 	// First, we'll compute the size of the current file so we can
-	// calculate the latest header written to disk.
+	// calculate the latest header written to disk. A partial record from
+	// a write cut short is cut off first, as for block headers.
+	if whole := fileInfo.Size() - fileInfo.Size()%32; whole != fileInfo.Size() {
+		if err := fhs.truncateFile(whole); err != nil {
+			return nil, err
+		}
+	}
 	fileHeight := uint32(fileInfo.Size()/32) - 1
 
 	// Using the file's current height, fetch the latest on-disk header.
@@ -991,6 +1004,12 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	// doing here.
 	if tipHash.IsEqual(latestFileHeader) {
 		return fhs, nil
+	}
+
+	// The index ahead of the file (see the block header store): roll it
+	// back to the file's tip rather than wrap around.
+	if fileHeight < tipHeight {
+		return fhs, fhs.truncateIndices(latestFileHeader, nil, false)
 	}
 
 	// Otherwise, we'll need to truncate the file until it matches the
