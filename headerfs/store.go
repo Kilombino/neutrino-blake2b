@@ -300,6 +300,34 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 		headerStore: hStore,
 	}
 
+	// The file must be read with the BLAKE2b height it was written with.
+	// A file from before the height was recorded holds classic records
+	// only, which is fine as long as it stops below the height.
+	recorded, found, err := hStore.layoutHeight()
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case found && recorded != layout.v2Height:
+		return nil, fmt.Errorf("block headers on disk were stored "+
+			"with BLAKE2b height %d, the network now says %d: "+
+			"remove %s and its index to sync again", recorded,
+			layout.v2Height, hStore.file.Name())
+
+	case !found:
+		if layout.v2Height != 0 &&
+			fileInfo.Size() > int64(layout.offset(layout.v2Height)) {
+
+			return nil, fmt.Errorf("block headers on disk go past "+
+				"BLAKE2b height %d as classic headers: remove "+
+				"%s and its index to sync again",
+				layout.v2Height, hStore.file.Name())
+		}
+		if err := hStore.setLayoutHeight(layout.v2Height); err != nil {
+			return nil, err
+		}
+	}
+
 	// If the size of the file is zero, then this means that we haven't yet
 	// written the initial genesis header to disk, so we'll do so now.
 	if fileInfo.Size() == 0 {
@@ -564,9 +592,29 @@ func (h *blockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 	headerBuf.Reset()
 	defer headerBufPool.Put(headerBuf)
 
+	// The batch must start where the file ends and run without gaps:
+	// each record's place in the file is given by its height.
+	if len(hdrs) > 0 {
+		fileInfo, err := h.file.Stat()
+		if err != nil {
+			return err
+		}
+		want := int64(h.blockLayout.offset(hdrs[0].Height))
+		if fileInfo.Size() != want {
+			return fmt.Errorf("block header file is %d bytes, header "+
+				"%d belongs at %d", fileInfo.Size(),
+				hdrs[0].Height, want)
+		}
+	}
+
 	// Next, we'll write out all the passed headers in series into the
 	// buffer we just extracted from the pool.
-	for _, header := range hdrs {
+	for i, header := range hdrs {
+		if header.Height != hdrs[0].Height+uint32(i) {
+			return fmt.Errorf("block headers to write skip from "+
+				"height %d to %d", hdrs[0].Height+uint32(i)-1,
+				header.Height)
+		}
 		err := h.blockLayout.check(header.BlockHeader, header.Height)
 		if err != nil {
 			return err

@@ -212,3 +212,34 @@ func TestBlockHeaderStoreTrimsPartialRecord(t *testing.T) {
 		})
 	}
 }
+
+// TestBlockHeaderStoreRefusesOtherBlake2bHeight checks that a header file
+// written with one BLAKE2b height is not read with another (a changed
+// regtest activation height would read every later record at the wrong
+// offset), and that the same height opens fine.
+func TestBlockHeaderStoreRefusesOtherBlake2bHeight(t *testing.T) {
+	dir := t.TempDir()
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(dir, "test.db"), true, time.Second*10,
+	)
+	require.NoError(t, err)
+	defer db.Close()
+
+	params := chaincfg.SimNetParams
+	params.Blake2bHeight = 5
+	_, err = NewBlockHeaderStore(dir, db, &params)
+	require.NoError(t, err)
+
+	_, err = NewBlockHeaderStore(dir, db, &params)
+	require.NoError(t, err)
+
+	other := params
+	other.Blake2bHeight = 4
+	_, err = NewBlockHeaderStore(dir, db, &other)
+	require.ErrorContains(t, err, "BLAKE2b height 5")
+
+	none := params
+	none.Blake2bHeight = 0
+	_, err = NewBlockHeaderStore(dir, db, &none)
+	require.Error(t, err)
+}
