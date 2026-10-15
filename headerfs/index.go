@@ -440,6 +440,61 @@ func (h *headerIndex) truncateIndices(newTip *chainhash.Hash,
 	})
 }
 
+// hashAtHeight finds the hash the index holds for height by scanning every
+// entry, in the hash-prefix sub-buckets and in the root bucket where older
+// stores kept them. It is slow, and meant only for repairing a store at open.
+func (h *headerIndex) hashAtHeight(height uint32) (*chainhash.Hash, error) {
+	// errFound stops the scan at the first match.
+	errFound := errors.New("found")
+
+	var found *chainhash.Hash
+	err := walletdb.View(h.db, func(tx walletdb.ReadTx) error {
+		rootBucket := tx.ReadBucket(indexBucket)
+		match := func(k, v []byte) bool {
+			if len(k) != chainhash.HashSize || len(v) != 4 ||
+				binary.BigEndian.Uint32(v) != height {
+
+				return false
+			}
+			found, _ = chainhash.NewHash(k)
+			return true
+		}
+
+		return rootBucket.ForEach(func(k, v []byte) error {
+			// A nil value is a nested (sub-)bucket.
+			if v == nil {
+				sub := rootBucket.NestedReadBucket(k)
+				if sub == nil {
+					return nil
+				}
+				err := sub.ForEach(func(k, v []byte) error {
+					if match(k, v) {
+						return errFound
+					}
+					return nil
+				})
+				if err == errFound {
+					return errFound
+				}
+				return err
+			}
+			if match(k, v) {
+				return errFound
+			}
+			return nil
+		})
+	})
+	if found != nil {
+		return found, nil
+	}
+	if err != nil && !errors.Is(err, errFound) {
+		return nil, err
+	}
+
+	return nil, fmt.Errorf("%w: no header at height %d", ErrHashNotFound,
+		height)
+}
+
 // putHeaderEntry stores a headerEntry into the bbolt database. The entry is
 // always placed below a sub bucket with the first few bytes of the hash as its
 // name to improve write performance.

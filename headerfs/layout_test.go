@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
@@ -308,4 +309,107 @@ func TestBlockHeaderStoreRefusesOtherBlake2bHeight(t *testing.T) {
 	none.Blake2bHeight = 0
 	_, err = NewBlockHeaderStore(dir, db, &none)
 	require.Error(t, err)
+}
+
+// pairedFilterStores opens a block header store and a filter header store on
+// one database, as neutrino runs them: the filter store's index entries are
+// the block store's. It writes n block headers and their filter headers, and
+// returns the filter headers (heights 1 to n).
+func pairedFilterStores(t *testing.T, n int) (walletdb.DB, string,
+	[]FilterHeader) {
+
+	t.Helper()
+	dir := t.TempDir()
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(dir, "test.db"), true, time.Second*10,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	bS, err := NewBlockHeaderStore(dir, db, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+	fS, err := NewFilterHeaderStore(
+		dir, db, RegularFilter, &chaincfg.SimNetParams, nil,
+	)
+	require.NoError(t, err)
+
+	prev := *chaincfg.SimNetParams.GenesisHash
+	var blocks []BlockHeader
+	var filters []FilterHeader
+	for i := 1; i <= n; i++ {
+		h := &wire.BlockHeader{
+			Version: 1, PrevBlock: prev, Nonce: uint32(i),
+			Timestamp: time.Unix(int64(1_600_000_000+i), 0),
+		}
+		blocks = append(blocks, BlockHeader{BlockHeader: h, Height: uint32(i)})
+		filters = append(filters, FilterHeader{
+			HeaderHash: h.BlockHash(),
+			FilterHash: chainhash.DoubleHashH([]byte{byte(i), 0xf1}),
+			Height:     uint32(i),
+		})
+		prev = h.BlockHash()
+	}
+	require.NoError(t, bS.WriteHeaders(blocks...))
+	require.NoError(t, fS.WriteHeaders(filters...))
+
+	return db, dir, filters
+}
+
+// TestFilterHeaderStoreIndexAheadOfFile checks that a filter header file cut
+// short under a full index opens with the index's tip on the block hash at
+// the file's height (the tip key holds block hashes), so the store keeps
+// opening and syncs on from there.
+func TestFilterHeaderStoreIndexAheadOfFile(t *testing.T) {
+	db, dir, hdrs := pairedFilterStores(t, 20)
+
+	// The last two records never reached the disk; the index did.
+	path := filepath.Join(dir, "reg_filter_headers.bin")
+	fi, err := os.Stat(path)
+	require.NoError(t, err)
+	require.NoError(t, os.Truncate(path, fi.Size()-2*32))
+
+	var fS FilterHeaderStore
+	for i := 0; i < 2; i++ { // and it opens again after the repair
+		fS, err = NewFilterHeaderStore(
+			dir, db, RegularFilter, &chaincfg.SimNetParams, nil,
+		)
+		require.NoError(t, err)
+		tip, height, err := fS.ChainTip()
+		require.NoError(t, err)
+		require.EqualValues(t, 18, height)
+		require.Equal(t, hdrs[17].FilterHash, *tip)
+	}
+
+	// The lost headers are written again where they belong.
+	require.NoError(t, fS.WriteHeaders(hdrs[18:]...))
+	got, err := fS.FetchHeaderByHeight(20)
+	require.NoError(t, err)
+	require.Equal(t, hdrs[19].FilterHash, *got)
+}
+
+// TestFilterHeaderStoreShorterThanARecord checks that a filter header file
+// left with less than one whole record starts again from the genesis filter
+// header instead of wrapping its height around.
+func TestFilterHeaderStoreShorterThanARecord(t *testing.T) {
+	db, dir, _ := pairedFilterStores(t, 5)
+	fS, err := NewFilterHeaderStore(
+		dir, db, RegularFilter, &chaincfg.SimNetParams, nil,
+	)
+	require.NoError(t, err)
+	genesis, err := fS.FetchHeaderByHeight(0)
+	require.NoError(t, err)
+
+	path := filepath.Join(dir, "reg_filter_headers.bin")
+	require.NoError(t, os.Truncate(path, 20))
+
+	for i := 0; i < 2; i++ {
+		fS, err = NewFilterHeaderStore(
+			dir, db, RegularFilter, &chaincfg.SimNetParams, nil,
+		)
+		require.NoError(t, err)
+		tip, height, err := fS.ChainTip()
+		require.NoError(t, err)
+		require.EqualValues(t, 0, height)
+		require.Equal(t, *genesis, *tip)
+	}
 }

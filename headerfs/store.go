@@ -924,34 +924,7 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	// If the size of the file is zero, then this means that we haven't yet
 	// written the initial genesis header to disk, so we'll do so now.
 	if fileInfo.Size() == 0 {
-		var genesisFilterHash chainhash.Hash
-		switch filterType {
-		case RegularFilter:
-			basicFilter, err := builder.BuildBasicFilter(
-				netParams.GenesisBlock, nil,
-			)
-			if err != nil {
-				return nil, err
-			}
-
-			genesisFilterHash, err = builder.MakeHeaderForFilter(
-				basicFilter,
-				netParams.GenesisBlock.Header.PrevBlock,
-			)
-			if err != nil {
-				return nil, err
-			}
-
-		default:
-			return nil, fmt.Errorf("unknown filter type: %v", filterType)
-		}
-
-		genesisHeader := FilterHeader{
-			HeaderHash: *netParams.GenesisHash,
-			FilterHash: genesisFilterHash,
-			Height:     0,
-		}
-		if err := fhs.WriteHeaders(genesisHeader); err != nil {
+		if err := fhs.writeGenesis(filterType, netParams); err != nil {
 			return nil, err
 		}
 
@@ -987,12 +960,24 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	// First, we'll compute the size of the current file so we can
 	// calculate the latest header written to disk. A partial record from
 	// a write cut short is cut off first, as for block headers.
-	if whole := fileInfo.Size() - fileInfo.Size()%32; whole != fileInfo.Size() {
+	whole := fileInfo.Size() - fileInfo.Size()%32
+	if whole != fileInfo.Size() {
 		if err := fhs.truncateFile(whole); err != nil {
 			return nil, err
 		}
 	}
-	fileHeight := uint32(fileInfo.Size()/32) - 1
+
+	// Nothing whole left (a file shorter than one record): start again
+	// from the genesis filter header, as the block header store does,
+	// rather than let the height below wrap around.
+	if whole == 0 {
+		if err := fhs.writeGenesis(filterType, netParams); err != nil {
+			return nil, err
+		}
+
+		return fhs, nil
+	}
+	fileHeight := uint32(whole/32) - 1
 
 	// Using the file's current height, fetch the latest on-disk header.
 	latestFileHeader, err := fhs.readHeader(fileHeight)
@@ -1007,9 +992,17 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	}
 
 	// The index ahead of the file (see the block header store): roll it
-	// back to the file's tip rather than wrap around.
+	// back to the file's tip rather than wrap around. The tip key holds a
+	// block hash (toIndexEntry uses HeaderHash), not the filter header the
+	// file stores, so the block hash at the file's height is looked up in
+	// the index.
 	if fileHeight < tipHeight {
-		return fhs, fhs.truncateIndices(latestFileHeader, nil, false)
+		blockHash, err := fhs.hashAtHeight(fileHeight)
+		if err != nil {
+			return nil, err
+		}
+
+		return fhs, fhs.truncateIndices(blockHash, nil, false)
 	}
 
 	// Otherwise, we'll need to truncate the file until it matches the
@@ -1020,6 +1013,42 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	}
 
 	return fhs, nil
+}
+
+// writeGenesis writes the genesis filter header, the first record of a filter
+// header file.
+func (f *filterHeaderStore) writeGenesis(filterType HeaderType,
+	netParams *chaincfg.Params) error {
+
+	var genesisFilterHash chainhash.Hash
+	switch filterType {
+	case RegularFilter:
+		basicFilter, err := builder.BuildBasicFilter(
+			netParams.GenesisBlock, nil,
+		)
+		if err != nil {
+			return err
+		}
+
+		genesisFilterHash, err = builder.MakeHeaderForFilter(
+			basicFilter,
+			netParams.GenesisBlock.Header.PrevBlock,
+		)
+		if err != nil {
+			return err
+		}
+
+	default:
+		return fmt.Errorf("unknown filter type: %v", filterType)
+	}
+
+	genesisHeader := FilterHeader{
+		HeaderHash: *netParams.GenesisHash,
+		FilterHash: genesisFilterHash,
+		Height:     0,
+	}
+
+	return f.WriteHeaders(genesisHeader)
 }
 
 // maybeResetHeaderState will reset the header state if the header assertion
