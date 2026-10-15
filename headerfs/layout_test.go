@@ -480,3 +480,34 @@ func TestBlockHeaderStoreAcceptsEarlierForkV2Store(t *testing.T) {
 		})
 	}
 }
+
+// TestFetchHeaderChecksTheHash checks that FetchHeader refuses an index entry
+// whose height holds another header in the file (a stale entry).
+func TestFetchHeaderChecksTheHash(t *testing.T) {
+	dir := t.TempDir()
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(dir, "test.db"), true, time.Second*10,
+	)
+	require.NoError(t, err)
+	defer db.Close()
+
+	store, err := NewBlockHeaderStore(dir, db, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+	bhs := store.(*blockHeaderStore)
+	h1 := BlockHeader{BlockHeader: decodeHeader(t, blockHdrs[1]), Height: 1}
+	require.NoError(t, bhs.WriteHeaders(h1))
+
+	hash := h1.BlockHash()
+	_, height, err := store.FetchHeader(&hash)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, height)
+
+	// An entry left behind for another block at the same height.
+	stale := chainhash.DoubleHashH([]byte("stale"))
+	require.NoError(t, walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		return putHeaderEntry(tx.ReadWriteBucket(indexBucket),
+			headerEntry{hash: stale, height: 1})
+	}))
+	_, _, err = store.FetchHeader(&stale)
+	require.ErrorIs(t, err, ErrHashNotFound)
+}

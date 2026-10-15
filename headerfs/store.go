@@ -436,6 +436,12 @@ func (h *blockHeaderStore) FetchHeader(hash *chainhash.Hash) (*wire.BlockHeader,
 		return nil, 0, err
 	}
 
+	// A stale index entry (one the file no longer agrees with) is not
+	// the header asked for.
+	if header.BlockHash() != *hash {
+		return nil, 0, ErrHashNotFound
+	}
+
 	return &header, height, nil
 }
 
