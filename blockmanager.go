@@ -2878,6 +2878,20 @@ func (b *blockManager) rejectHeaderPeer(peer *ServerPeer, err error) {
 	if errors.As(err, &rerr) &&
 		rerr.ErrorCode == blockchain.ErrBadHeaderV2 {
 
+		// A peer the user named (a node of their own) is not banned: the
+		// cause is as likely a wrong setting here (a regtest activation
+		// height) as the peer, and a 24-hour ban would outlast fixing it.
+		// It is disconnected with an error that says what to look at.
+		if peer.persistent {
+			log.Errorf("Header from persistent peer %v breaks a BLAKE2b "+
+				"header rule: %v -- disconnecting it (not banned). "+
+				"Check that it is on the BLAKE2b chain and that the "+
+				"activation height configured here matches its own",
+				peer, err)
+			peer.Disconnect()
+			return
+		}
+
 		log.Warnf("Header from %v breaks a BLAKE2b header rule: %v "+
 			"-- banning peer", peer, err)
 		banErr := b.cfg.BanPeer(peer.Addr(), banman.InvalidBlock)
