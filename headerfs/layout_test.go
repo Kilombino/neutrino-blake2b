@@ -413,3 +413,70 @@ func TestFilterHeaderStoreShorterThanARecord(t *testing.T) {
 		require.Equal(t, *genesis, *tip)
 	}
 }
+
+// TestBlockHeaderStoreAcceptsEarlierForkV2Store checks that a store from the
+// earlier fork (v2 records past the BLAKE2b height, no height recorded) opens
+// when the record at the height is a v2 header committing to it, and is still
+// refused when that record commits to another height.
+func TestBlockHeaderStoreAcceptsEarlierForkV2Store(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		commit int // height the v2 record says, relative to the BLAKE2b height
+		ok     bool
+	}{
+		{"commits to the height", 0, true},
+		{"commits to another height", 5, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := walletdb.Create(
+				"bdb", filepath.Join(dir, "test.db"), true,
+				time.Second*10,
+			)
+			require.NoError(t, err)
+			defer db.Close()
+
+			params := chaincfg.SimNetParams
+			params.Blake2bHeight = int32(len(blockHdrs))
+			store, err := NewBlockHeaderStore(dir, db, &params)
+			require.NoError(t, err)
+			bhs := store.(*blockHeaderStore)
+
+			var hdrs []BlockHeader
+			for i, s := range blockHdrs[1:] {
+				hdrs = append(hdrs, BlockHeader{
+					BlockHeader: decodeHeader(t, s), Height: uint32(i + 1),
+				})
+			}
+			// A real v2 header, made to commit to the test's height.
+			v2 := decodeHeader(t, blake2bHdrs[0])
+			v2.Height = params.Blake2bHeight + int32(tc.commit)
+			hdrs = append(hdrs, BlockHeader{
+				BlockHeader: v2, Height: uint32(params.Blake2bHeight),
+			})
+			require.NoError(t, bhs.WriteHeaders(hdrs...))
+
+			// The earlier fork recorded no height.
+			require.NoError(t, walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+				return tx.ReadWriteBucket(indexBucket).Delete(blake2bHeightKey)
+			}))
+
+			store, err = NewBlockHeaderStore(dir, db, &params)
+			if !tc.ok {
+				require.ErrorContains(t, err, "classic headers")
+				return
+			}
+			require.NoError(t, err)
+			tip, height, err := store.ChainTip()
+			require.NoError(t, err)
+			require.EqualValues(t, params.Blake2bHeight, height)
+			require.Equal(t, v2.BlockHash(), tip.BlockHash())
+
+			// The height is recorded now.
+			got, found, err := store.(*blockHeaderStore).layoutHeight()
+			require.NoError(t, err)
+			require.True(t, found)
+			require.EqualValues(t, params.Blake2bHeight, got)
+		})
+	}
+}
