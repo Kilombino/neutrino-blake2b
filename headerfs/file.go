@@ -43,6 +43,14 @@ func (h *headerStore) appendRaw(header []byte) error {
 			"error: %w", h.indexType, err)
 	}
 
+	// The records reach the disk before the index commit that points at
+	// them, so the index cannot get ahead of the file (a phone killed, a
+	// power cut between the two).
+	if err := h.file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync header type %s: %w",
+			h.indexType, err)
+	}
+
 	return nil
 }
 
