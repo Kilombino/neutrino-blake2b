@@ -315,8 +315,12 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 			layout.v2Height, hStore.file.Name())
 
 	case !found:
+		// A store from the earlier fork, which laid out v2 records past
+		// the height without recording it, is fine too: the record at
+		// the height is then a v2 header committing to that height.
 		if layout.v2Height != 0 &&
-			fileInfo.Size() > int64(layout.offset(layout.v2Height)) {
+			fileInfo.Size() > int64(layout.offset(layout.v2Height)) &&
+			!hStore.v2RecordAt(layout.v2Height, layout) {
 
 			return nil, fmt.Errorf("block headers on disk go past "+
 				"BLAKE2b height %d as classic headers: remove "+
@@ -572,6 +576,22 @@ type BlockHeader struct {
 	// Height is the height of this block header within the current main
 	// chain.
 	Height uint32
+}
+
+// v2RecordAt reports whether the file holds, at height (laid out as in
+// layout), a whole v2 header that commits to that height.
+func (h *headerStore) v2RecordAt(height uint32, layout blockHeaderLayout) bool {
+	buf := make([]byte, wire.BlockHeaderLenV2)
+	n, err := h.file.ReadAt(buf, int64(layout.offset(height)))
+	if err != nil || n != len(buf) {
+		return false
+	}
+	var hdr wire.BlockHeader
+	if err := hdr.Deserialize(bytes.NewReader(buf)); err != nil {
+		return false
+	}
+
+	return hdr.IsV2() && hdr.Height >= 0 && uint32(hdr.Height) == height
 }
 
 // toIndexEntry converts the BlockHeader into a matching headerEntry. This
