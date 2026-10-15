@@ -37,12 +37,13 @@ func mineClassic(t *testing.T, params *chaincfg.Params, prev *wire.BlockHeader) 
 	}
 }
 
-// TestHandleHeadersBansSHA256dPeer checks that a peer sending a classic header
-// at or past the BLAKE2b height (a peer on the SHA256d chain) is banned, so it
-// is not dialled again.
-func TestHandleHeadersBansSHA256dPeer(t *testing.T) {
-	t.Parallel()
+// sendSHA256dHeaders hands the block manager headers from a peer still on the
+// SHA256d chain (a classic header at the BLAKE2b height) and returns the
+// addresses it banned and whether the peer was disconnected.
+func sendSHA256dHeaders(t *testing.T, persistent bool) ([]string,
+	[]banman.Reason, bool) {
 
+	t.Helper()
 	params := chaincfg.SimNetParams
 	params.Blake2bHeight = 3
 	params.Blake2bTargetShift = 20
@@ -77,10 +78,6 @@ func TestHandleHeadersBansSHA256dPeer(t *testing.T) {
 
 	fakePeer, err := peer.NewOutboundPeer(&peer.Config{}, "sha256d:8333")
 	require.NoError(t, err)
-	disconnected := func() bool {
-		return reflect.ValueOf(fakePeer).Elem().
-			FieldByName("disconnect").Int() == 1
-	}
 
 	// Heights 1 and 2 are below the BLAKE2b height: classic is right.
 	h1 := mineClassic(t, &params, &params.GenesisBlock.Header)
@@ -90,12 +87,37 @@ func TestHandleHeadersBansSHA256dPeer(t *testing.T) {
 
 	bm.handleHeadersMsg(&headersMsg{
 		headers: &wire.MsgHeaders{Headers: []*wire.BlockHeader{h1, h2, h3}},
-		peer:    &ServerPeer{Peer: fakePeer},
+		peer:    &ServerPeer{Peer: fakePeer, persistent: persistent},
 	})
 
+	disconnected := reflect.ValueOf(fakePeer).Elem().
+		FieldByName("disconnect").Int() == 1
+
+	return banned, reasons, disconnected
+}
+
+// TestHandleHeadersBansSHA256dPeer checks that a peer sending a classic header
+// at or past the BLAKE2b height (a peer on the SHA256d chain) is banned, so it
+// is not dialled again.
+func TestHandleHeadersBansSHA256dPeer(t *testing.T) {
+	t.Parallel()
+
+	banned, reasons, disconnected := sendSHA256dHeaders(t, false)
 	require.Equal(t, []string{"sha256d:8333"}, banned)
 	require.Equal(t, []banman.Reason{banman.InvalidBlock}, reasons)
-	require.True(t, disconnected())
+	require.True(t, disconnected)
+}
+
+// TestHandleHeadersDisconnectsPersistentPeer checks that a persistent peer (a
+// node the user named, often their own) sending the same headers is only
+// disconnected: a wrong activation height here would otherwise ban the
+// user's own node for 24 hours, past fixing the setting.
+func TestHandleHeadersDisconnectsPersistentPeer(t *testing.T) {
+	t.Parallel()
+
+	banned, _, disconnected := sendSHA256dHeaders(t, true)
+	require.Empty(t, banned)
+	require.True(t, disconnected)
 }
 
 // TestHeadersImportRefusedOnBlake2b checks that the 80-byte-only header import
