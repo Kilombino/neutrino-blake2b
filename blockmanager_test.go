@@ -946,3 +946,45 @@ func TestHandleHeaders(t *testing.T) {
 	bm.handleHeadersMsg(hmsg)
 	assertPeerDisconnected(true)
 }
+
+// TestBlockManagerEmptyHeadersFromSyncPeer checks that a sync peer that says
+// it is ahead of our tip but answers getheaders with no headers is dropped, so
+// the sync moves on to another peer instead of waiting on it, and that the
+// same message from another peer, or from a sync peer not ahead of us, is not.
+func TestBlockManagerEmptyHeadersFromSyncPeer(t *testing.T) {
+	t.Parallel()
+
+	newPeer := func(lastBlock int32) (*peer.Peer, *ServerPeer) {
+		p, err := peer.NewOutboundPeer(&peer.Config{}, "fake:123")
+		require.NoError(t, err)
+		p.UpdateLastBlockHeight(lastBlock)
+		return p, &ServerPeer{Peer: p}
+	}
+	disconnected := func(p *peer.Peer) bool {
+		return reflect.ValueOf(p).Elem().FieldByName("disconnect").
+			Int() == 1
+	}
+	empty := func(sp *ServerPeer) *headersMsg {
+		return &headersMsg{headers: &wire.MsgHeaders{}, peer: sp}
+	}
+
+	bm, _, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+
+	// Ahead of our tip (genesis), the sync peer, and nothing: dropped.
+	ahead, aheadSP := newPeer(100)
+	bm.syncPeer = aheadSP
+	bm.handleHeadersMsg(empty(aheadSP))
+	require.True(t, disconnected(ahead))
+
+	// The same from a peer that isn't the sync peer: kept.
+	other, otherSP := newPeer(100)
+	bm.handleHeadersMsg(empty(otherSP))
+	require.False(t, disconnected(other))
+
+	// A sync peer at our tip has nothing more to send: kept.
+	level, levelSP := newPeer(0)
+	bm.syncPeer = levelSP
+	bm.handleHeadersMsg(empty(levelSP))
+	require.False(t, disconnected(level))
+}

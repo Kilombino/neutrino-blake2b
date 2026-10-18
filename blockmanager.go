@@ -2438,8 +2438,24 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	msg := hmsg.headers
 	numHeaders := len(msg.Headers)
 
-	// Nothing to do for an empty headers message.
+	// An empty headers message has nothing to add. From the sync peer,
+	// when that peer says it is ahead of our tip, it means the peer won't
+	// serve the headers we asked for (Bitcoin Core and Knots answer so
+	// while they consider themselves in initial block download). Nothing
+	// else would pick another sync peer, so the sync would wait on it for
+	// good: disconnect it and sync from another.
 	if numHeaders == 0 {
+		if hmsg.peer == b.SyncPeer() && !b.BlockHeadersSynced() {
+			_, tipHeight, err := b.cfg.BlockHeaders.ChainTip()
+			if err == nil && hmsg.peer.LastBlock() > int32(tipHeight) {
+				log.Warnf("Sync peer %s is at height %d but "+
+					"sent no headers past our tip at %d: "+
+					"syncing from another peer",
+					hmsg.peer.Addr(), hmsg.peer.LastBlock(),
+					tipHeight)
+				hmsg.peer.Disconnect()
+			}
+		}
 		return
 	}
 
