@@ -440,9 +440,91 @@ func (h *headerIndex) truncateIndices(newTip *chainhash.Hash,
 	})
 }
 
+// rollBackBlockIndex rolls the block header index back to newTip, at height,
+// after the index got ahead of the header file. The entries above height are
+// deleted in the same transaction: their headers are gone from the file, and
+// left behind they would sit next to the entries a later sync writes at the
+// same heights, where hashAtHeight could pick one of them. The index is
+// shared with the filter header store, so a filter tip above height is moved
+// back to newTip too; that store then cuts its file back to it when it opens.
+func (h *headerIndex) rollBackBlockIndex(newTip *chainhash.Hash,
+	height uint32) error {
+
+	if h.indexType != Block {
+		return fmt.Errorf("rollBackBlockIndex on a %d index", h.indexType)
+	}
+
+	return walletdb.Update(h.db, func(tx walletdb.ReadWriteTx) error {
+		rootBucket := tx.ReadWriteBucket(indexBucket)
+
+		// Collect first: a bucket must not change while ForEach walks it.
+		type stale struct {
+			bucket walletdb.ReadWriteBucket
+			key    []byte
+		}
+		var toDelete []stale
+		collect := func(b walletdb.ReadWriteBucket) error {
+			return b.ForEach(func(k, v []byte) error {
+				if len(k) == chainhash.HashSize && len(v) == 4 &&
+					binary.BigEndian.Uint32(v) > height {
+
+					key := append([]byte(nil), k...)
+					toDelete = append(toDelete, stale{b, key})
+				}
+				return nil
+			})
+		}
+		if err := collect(rootBucket); err != nil {
+			return err
+		}
+		var subs [][]byte
+		err := rootBucket.ForEach(func(k, v []byte) error {
+			// A nil value is a nested (sub-)bucket.
+			if v == nil {
+				subs = append(subs, append([]byte(nil), k...))
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		for _, name := range subs {
+			sub := rootBucket.NestedReadWriteBucket(name)
+			if sub == nil {
+				continue
+			}
+			if err := collect(sub); err != nil {
+				return err
+			}
+		}
+
+		// The filter tip, read before its entry may be deleted below.
+		filterAbove := false
+		if tip := rootBucket.Get(regFilterTip); len(tip) == chainhash.HashSize {
+			tipHeight, err := getHeaderEntry(rootBucket, tip)
+			filterAbove = err != nil || tipHeight > height
+		}
+
+		for _, e := range toDelete {
+			if err := e.bucket.Delete(e.key); err != nil {
+				return err
+			}
+		}
+		if filterAbove {
+			if err := rootBucket.Put(regFilterTip, newTip[:]); err != nil {
+				return err
+			}
+		}
+
+		return rootBucket.Put(bitcoinTip, newTip[:])
+	})
+}
+
 // hashAtHeight finds the hash the index holds for height by scanning every
 // entry, in the hash-prefix sub-buckets and in the root bucket where older
 // stores kept them. It is slow, and meant only for repairing a store at open.
+// It takes the first entry at height: rollBackBlockIndex deletes the entries
+// above the tip it rolls back to, so a later sync leaves one per height.
 func (h *headerIndex) hashAtHeight(height uint32) (*chainhash.Hash, error) {
 	// errFound stops the scan at the first match.
 	errFound := errors.New("found")

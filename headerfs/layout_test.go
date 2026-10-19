@@ -417,15 +417,19 @@ func TestFilterHeaderStoreShorterThanARecord(t *testing.T) {
 // TestBlockHeaderStoreAcceptsEarlierForkV2Store checks that a store from the
 // earlier fork (v2 records past the BLAKE2b height, no height recorded) opens
 // when the record at the height is a v2 header committing to it, and is still
-// refused when that record commits to another height.
+// refused when that record commits to another height. A store whose last
+// write was cut short inside the record at the height opens too, on the
+// header below it.
 func TestBlockHeaderStoreAcceptsEarlierForkV2Store(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		commit int // height the v2 record says, relative to the BLAKE2b height
+		cut    int // bytes cut off the record at the height
 		ok     bool
 	}{
-		{"commits to the height", 0, true},
-		{"commits to another height", 5, false},
+		{"commits to the height", 0, 0, true},
+		{"commits to another height", 5, 0, false},
+		{"torn record at the height", 0, 100, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -461,6 +465,15 @@ func TestBlockHeaderStoreAcceptsEarlierForkV2Store(t *testing.T) {
 				return tx.ReadWriteBucket(indexBucket).Delete(blake2bHeightKey)
 			}))
 
+			if tc.cut > 0 {
+				path := filepath.Join(dir, "block_headers.bin")
+				fi, err := os.Stat(path)
+				require.NoError(t, err)
+				require.NoError(t, os.Truncate(
+					path, fi.Size()-int64(tc.cut),
+				))
+			}
+
 			store, err = NewBlockHeaderStore(dir, db, &params)
 			if !tc.ok {
 				require.ErrorContains(t, err, "classic headers")
@@ -469,8 +482,14 @@ func TestBlockHeaderStoreAcceptsEarlierForkV2Store(t *testing.T) {
 			require.NoError(t, err)
 			tip, height, err := store.ChainTip()
 			require.NoError(t, err)
-			require.EqualValues(t, params.Blake2bHeight, height)
-			require.Equal(t, v2.BlockHash(), tip.BlockHash())
+			if tc.cut > 0 {
+				below := hdrs[len(hdrs)-2]
+				require.EqualValues(t, params.Blake2bHeight-1, height)
+				require.Equal(t, below.BlockHash(), tip.BlockHash())
+			} else {
+				require.EqualValues(t, params.Blake2bHeight, height)
+				require.Equal(t, v2.BlockHash(), tip.BlockHash())
+			}
 
 			// The height is recorded now.
 			got, found, err := store.(*blockHeaderStore).layoutHeight()
@@ -510,4 +529,78 @@ func TestFetchHeaderChecksTheHash(t *testing.T) {
 	}))
 	_, _, err = store.FetchHeader(&stale)
 	require.ErrorIs(t, err, ErrHashNotFound)
+}
+
+// TestBlockIndexRollbackDeletesStaleEntries checks the index-ahead repair of
+// the block header store: the entries above the file's tip are deleted with
+// the rollback, and a filter tip above it is moved back too. Otherwise a
+// crash, a reorg and another crash would leave two entries at a height, and
+// the filter store's repair could take the stale one.
+func TestBlockIndexRollbackDeletesStaleEntries(t *testing.T) {
+	db, dir, filters := pairedFilterStores(t, 20)
+
+	// The last two block records never reached the disk; the index did.
+	path := filepath.Join(dir, "block_headers.bin")
+	fi, err := os.Stat(path)
+	require.NoError(t, err)
+	require.NoError(t, os.Truncate(path, fi.Size()-2*80))
+
+	bS, err := NewBlockHeaderStore(dir, db, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+	_, height, err := bS.ChainTip()
+	require.NoError(t, err)
+	require.EqualValues(t, 18, height)
+	for _, f := range filters[18:] {
+		_, err := bS.HeightFromHash(&f.HeaderHash)
+		require.ErrorIs(t, err, ErrHashNotFound, "height %d", f.Height)
+	}
+
+	// The filter store follows the block tip back and cuts its file.
+	fS, err := NewFilterHeaderStore(
+		dir, db, RegularFilter, &chaincfg.SimNetParams, nil,
+	)
+	require.NoError(t, err)
+	tip, height, err := fS.ChainTip()
+	require.NoError(t, err)
+	require.EqualValues(t, 18, height)
+	require.Equal(t, filters[17].FilterHash, *tip)
+
+	// A reorg writes other blocks at 19 and 20, then the filter file
+	// loses its last record under a full index: the repair finds the
+	// new block at 19, the only entry left there.
+	prev := filters[17].HeaderHash
+	var blocks []BlockHeader
+	var fork []FilterHeader
+	for i := uint32(19); i <= 20; i++ {
+		h := &wire.BlockHeader{
+			Version: 1, PrevBlock: prev, Nonce: 1000 + i,
+			Timestamp: time.Unix(int64(1_700_000_000+i), 0),
+		}
+		blocks = append(blocks, BlockHeader{BlockHeader: h, Height: i})
+		fork = append(fork, FilterHeader{
+			HeaderHash: h.BlockHash(),
+			FilterHash: chainhash.DoubleHashH([]byte{byte(i), 0xf2}),
+			Height:     i,
+		})
+		prev = h.BlockHash()
+	}
+	require.NoError(t, bS.WriteHeaders(blocks...))
+	require.NoError(t, fS.WriteHeaders(fork...))
+
+	path = filepath.Join(dir, "reg_filter_headers.bin")
+	fi, err = os.Stat(path)
+	require.NoError(t, err)
+	require.NoError(t, os.Truncate(path, fi.Size()-32))
+
+	fS, err = NewFilterHeaderStore(
+		dir, db, RegularFilter, &chaincfg.SimNetParams, nil,
+	)
+	require.NoError(t, err)
+	tip, height, err = fS.ChainTip()
+	require.NoError(t, err)
+	require.EqualValues(t, 19, height)
+	require.Equal(t, fork[0].FilterHash, *tip)
+	got, err := bS.HeightFromHash(&fork[0].HeaderHash)
+	require.NoError(t, err)
+	require.EqualValues(t, 19, got)
 }

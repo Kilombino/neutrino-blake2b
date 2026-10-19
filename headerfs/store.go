@@ -317,9 +317,13 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 	case !found:
 		// A store from the earlier fork, which laid out v2 records past
 		// the height without recording it, is fine too: the record at
-		// the height is then a v2 header committing to that height.
-		if layout.v2Height != 0 &&
-			fileInfo.Size() > int64(layout.offset(layout.v2Height)) &&
+		// the height is then a v2 header committing to that height. So
+		// is a file that ends inside the record at the height (a write
+		// cut short): both layouts agree below the height, and the
+		// partial record is cut off further down.
+		start := int64(layout.offset(layout.v2Height))
+		torn := fileInfo.Size() < start+wire.BlockHeaderLenV2
+		if layout.v2Height != 0 && fileInfo.Size() > start && !torn &&
 			!hStore.v2RecordAt(layout.v2Height, layout) {
 
 			return nil, fmt.Errorf("block headers on disk go past "+
@@ -401,7 +405,7 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 	// again. Roll the index back to the file's tip instead; the headers
 	// past it are fetched again on the next sync.
 	if fileHeight < tipHeight {
-		return bhs, bhs.truncateIndices(&latestBlockHash, nil, false)
+		return bhs, bhs.rollBackBlockIndex(&latestBlockHash, fileHeight)
 	}
 
 	// Otherwise, we'll need to truncate the file until it matches the
